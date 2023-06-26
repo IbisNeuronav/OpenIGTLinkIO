@@ -22,6 +22,7 @@ Version:   $Revision: 1.4 $
 #include <igtl_header.h>
 #include <igtlClientSocket.h>
 #include <igtlCommandMessage.h>
+#include <igtlVideoMessage.h>
 #include <igtlMessageBase.h>
 #include <igtlMessageHeader.h>
 #include <igtlOSUtil.h>
@@ -66,6 +67,14 @@ const char *igtlioConnector::ConnectorTypeStr[igtlioConnector::NUM_TYPE] =
 };
 
 //----------------------------------------------------------------------------
+const char *igtlioConnector::ConnectorProtocolStr[igtlioConnector::NUM_PROTOCOL] =
+{
+  "?", // PROTOCOL_NOT_DEFINED
+  "TCP", // PROTOCOL_TCP
+  "UDP", // PROTOCOL_UDP
+};
+
+//----------------------------------------------------------------------------
 const char *igtlioConnector::ConnectorStateStr[igtlioConnector::NUM_STATE] =
 {
   "OFF",       // OFF
@@ -76,16 +85,21 @@ const char *igtlioConnector::ConnectorStateStr[igtlioConnector::NUM_STATE] =
 //----------------------------------------------------------------------------
 igtlioConnector::igtlioConnector()
   : Type(TYPE_CLIENT)
+  , Protocol(PROTOCOL_TCP)
   , State(STATE_OFF)
   , Persistent(PERSISTENT_OFF)
   , Thread(vtkMultiThreaderPointer::New())
   , ConnectionThreadID(-1)
   , ServerHostname("localhost")
+  , DeviceName("UNDEFINED")
+  , DeviceType("UNDEFINED")
   , ServerPort(18944)
   , ServerStopFlag(false)
   , RestrictDeviceName(0)
   , PushOutgoingMessageFlag(0)
   , DeviceFactory(igtlioDeviceFactoryPointer::New())
+  , RTPMutex(igtl::SimpleMutexLock::New())
+  , RTPWrapper(igtl::MessageRTPWrapper::New())
   , CheckCRC(true)
   , NextCommandID(1)
   , NextClientID(1)
@@ -128,6 +142,17 @@ void igtlioConnector::PrintSelf(ostream& os, vtkIndent indent)
       os << indent << "State: CONNECTED\n";
       break;
     }
+
+  switch (this->Protocol)
+    {
+    case PROTOCOL_TCP:
+      os << indent << "Protocol: TCP\n";
+      break;
+    case PROTOCOL_UDP:
+      os << indent << "Protocol: UDP\n";
+      break;
+    }
+
   os << indent << "Persistent: " << this->Persistent << "\n";
   os << indent << "Restrict Device Name: " << this->RestrictDeviceName << "\n";
   os << indent << "Push Outgoing Message Flag: " << this->PushOutgoingMessageFlag << "\n";
@@ -184,6 +209,30 @@ int igtlioConnector::SetTypeClient(std::string hostname, int port)
 }
 
 //----------------------------------------------------------------------------
+int igtlioConnector::SetProtocolTCP()
+{
+  if (this->Protocol == PROTOCOL_TCP)
+    {
+    return 1;
+    }
+  this->Protocol = PROTOCOL_TCP;
+  this->Modified();
+  return 1;
+}
+
+//----------------------------------------------------------------------------
+int igtlioConnector::SetProtocolUDP()
+{
+  if (this->Protocol == PROTOCOL_UDP)
+    {
+    return 1;
+    }
+  this->Protocol = PROTOCOL_UDP;
+  this->Modified();
+  return 1;
+}
+
+//----------------------------------------------------------------------------
 void igtlioConnector::SetCheckCRC(bool c)
 {
   this->CheckCRC = c;
@@ -199,6 +248,13 @@ int igtlioConnector::Start()
     return 0;
     }
 
+  // setup RTPWrapper:
+  // TODO: add to config (will just set an arbitrary value for now)
+  int kbps = 6000;
+  int netWorkBandWidthInBPS = kbps * 1000; // networkBandwidth is in kbps
+  int time = floor( 8 * RTP_PAYLOAD_LENGTH * 1e9 / netWorkBandWidthInBPS + 1.0 ); // the needed time in nanosecond to send a RTP payload.
+  RTPWrapper->packetIntervalTime = time;
+
   if (this->ConnectionThreadID >= 0)
     {
     vtkErrorMacro("Connector is already running!");
@@ -207,6 +263,8 @@ int igtlioConnector::Start()
 
   this->ServerStopFlag = false;
   this->ConnectionThreadID = this->Thread->SpawnThread((vtkThreadFunctionType)&igtlioConnector::ConnectionAcceptThreadFunction, this);
+
+    std::cout << "[igtlioConnector::Start] Exited connect thread." << std::endl;
 
   // Following line is necessary in some Linux environment,
   // since it takes for a while for the thread to update
@@ -239,15 +297,17 @@ int igtlioConnector::Stop()
      }
 
     return 1;
-    }
+  }
   else
-    {
+  {
+    std::cout << "[igtlioConnector::Stop] Nothing to do." << std::endl;
+
     return 0;
-    }
+  }
 }
 
 //---------------------------------------------------------------------------
-void* igtlioConnector::ReceiverThreadFunction(void* ptr)
+void* igtlioConnector::TCPReceiverThreadFunction(void* ptr)
 {
   vtkMultiThreader::ThreadInfo* vinfo = static_cast<vtkMultiThreader::ThreadInfo*>(ptr);
   igtlioConnector* connector = static_cast<igtlioConnector*>(vinfo->UserData);
@@ -263,7 +323,7 @@ void* igtlioConnector::ReceiverThreadFunction(void* ptr)
       for (std::vector<int>::iterator clientIdIt = clientIds.begin(); clientIdIt != clientIds.end(); ++clientIdIt)
         {
         Client client = connector->GetClient(*clientIdIt);
-        if (client.ThreadID == currentThreadID)
+        if (client.ReceiveThreadID == currentThreadID)
           {
             clientID = *clientIdIt;
             break;
@@ -271,7 +331,143 @@ void* igtlioConnector::ReceiverThreadFunction(void* ptr)
         }
       }
 
-    connected = connector->ReceiveController(clientID);
+    std::string address = std::string();
+    int port = -99;
+    connector->GetClient(clientID).Socket->GetSocketAddressAndPort(address, port);
+
+    connected = connector->ReceiveTCPController(clientID);
+    }
+
+  connector->RemoveClient(clientID);
+
+  // Signal to the threader that this thread has become free
+#if VTK_MAJOR_VERSION < 9 // change to std::recursive_mutex with v9.0.0
+  vinfo->ActiveFlagLock->Lock();
+#else
+  vinfo->ActiveFlagLock->lock();
+#endif
+  (*vinfo->ActiveFlag) = 0;
+#if VTK_MAJOR_VERSION < 9 // change to std::recursive_mutex with v9.0.0
+  vinfo->ActiveFlagLock->Unlock();
+#else
+  vinfo->ActiveFlagLock->unlock();
+#endif
+  return NULL; //why???
+}
+
+//---------------------------------------------------------------------------
+#include "igtlMultiThreader.h"
+void* igtlioConnector::UDPReceiverThreadFunction(void* ptr)
+{
+    // Get thread information
+    igtl::MultiThreader::ThreadInfo* info = static_cast<igtl::MultiThreader::ThreadInfo*>(ptr);
+    igtlioConnector* connector = static_cast<igtlioConnector*>(info->UserData);
+    unsigned char UDPPacket[RTP_PAYLOAD_LENGTH+RTP_HEADER_LENGTH];
+    while( !connector->ServerStopFlag ){
+        int totMsgLen = connector->GetClient(0).UDPSocket->ReadSocket( UDPPacket, RTP_PAYLOAD_LENGTH+RTP_HEADER_LENGTH );
+        connector->WriteTimeInfo( UDPPacket );
+        if ( totMsgLen > 0 ){
+            connector->RTPMutex->Lock();
+            connector->RTPWrapper->PushDataIntoPacketBuffer( UDPPacket, totMsgLen );
+            connector->RTPMutex->Unlock();
+        }
+        //TODO: set this value appropriately
+        igtl::Sleep(1);
+    }
+    return NULL;
+}
+
+//---------------------------------------------------------------------------
+void igtlioConnector::WriteTimeInfo( unsigned char * UDPPacket ){
+    igtl_uint16 fragmentField;
+    igtl_uint32 messageID;
+    int extendedHeaderLength = IGTL_EXTENDED_HEADER_SIZE;
+    memcpy(&fragmentField, (void*)(UDPPacket + RTP_HEADER_LENGTH+IGTL_HEADER_SIZE+extendedHeaderLength-2),2);
+    memcpy(&messageID, (void*)(UDPPacket + RTP_HEADER_LENGTH+IGTL_HEADER_SIZE+extendedHeaderLength-6),4);
+    if(igtl_is_little_endian()){
+        fragmentField = BYTE_SWAP_INT16(fragmentField);
+        messageID = BYTE_SWAP_INT32(messageID);
+    }
+}
+
+//---------------------------------------------------------------------------
+void* igtlioConnector::UnwrapThreadFunction(void* ptr)
+{
+    vtkMultiThreader::ThreadInfo* vinfo = static_cast<vtkMultiThreader::ThreadInfo*>(ptr);
+    igtlioConnector* connector = static_cast<igtlioConnector*>(vinfo->UserData);
+    const char * deviceName = connector->DeviceName.c_str();
+    const char * deviceType = connector->DeviceType.c_str();
+    std::cout << "[igtlioConnector::UnwrapThreadFunction] Connector " << connector->GetName() << " is unwrapping for DeviceType" << deviceType << "  and DeviceName " << deviceName << std::endl;
+
+    int currentThreadID = vinfo->ThreadID;
+    int clientID = -1;
+    // Communication -- common to both Server and Client
+    while (!connector->ServerStopFlag)
+      {
+      if (clientID == -1)
+        {
+        std::vector<int> clientIds = connector->GetClientIds();
+        for (std::vector<int>::iterator clientIdIt = clientIds.begin(); clientIdIt != clientIds.end(); ++clientIdIt)
+          {
+          Client client = connector->GetClient(*clientIdIt);
+          if (client.UnwrapThreadID == currentThreadID)
+            {
+              clientID = *clientIdIt;
+              break;
+            }
+          }
+        }
+      connector->RTPMutex->Lock();
+      int returnflag = connector->RTPWrapper->UnWrapPacketWithTypeAndName(deviceType, deviceName);
+      connector->RTPMutex->Unlock();
+      //TODO: set this value appropriately
+      igtl::Sleep(1);
+    }
+    // Signal to the threader that this thread has become free
+  #if VTK_MAJOR_VERSION < 9 // change to std::recursive_mutex with v9.0.0
+    vinfo->ActiveFlagLock->Lock();
+  #else
+    vinfo->ActiveFlagLock->lock();
+  #endif
+    (*vinfo->ActiveFlag) = 0;
+  #if VTK_MAJOR_VERSION < 9 // change to std::recursive_mutex with v9.0.0
+    vinfo->ActiveFlagLock->Unlock();
+  #else
+    vinfo->ActiveFlagLock->unlock();
+  #endif
+    return NULL; //why???
+}
+
+//---------------------------------------------------------------------------
+void* igtlioConnector::UDPProcessThreadFunction(void* ptr)
+{
+    std::cout << "[igtlioConnector::UDPProcessThreadFunction] Entering." << std::endl;
+
+  vtkMultiThreader::ThreadInfo* vinfo = static_cast<vtkMultiThreader::ThreadInfo*>(ptr);
+  igtlioConnector* connector = static_cast<igtlioConnector*>(vinfo->UserData);
+  int currentThreadID = vinfo->ThreadID;
+  int clientID = -1;
+  // Communication -- common to both Server and Client
+  while (!connector->ServerStopFlag)
+    {
+    if (clientID == -1)
+      {
+      std::vector<int> clientIds = connector->GetClientIds();
+      for (std::vector<int>::iterator clientIdIt = clientIds.begin(); clientIdIt != clientIds.end(); ++clientIdIt)
+        {
+        Client client = connector->GetClient(*clientIdIt);
+        if (client.ProcessThreadID == currentThreadID)
+          {
+            clientID = *clientIdIt;
+            break;
+          }
+        }
+      }
+
+    connector->ReceiveUDPController(clientID);
+    connector->RTPMutex->Unlock();
+    //TODO: set this value appropriately
+    igtl::Sleep(1);
     }
 
   connector->RemoveClient(clientID);
@@ -337,6 +533,7 @@ void* igtlioConnector::ConnectionAcceptThreadFunction(void* ptr)
     connector->ServerSocket = igtl::ServerSocket::New();
     if (connector->ServerSocket->CreateServer(connector->ServerPort) == -1)
       {
+        std::cerr << "[igtlioConnector::ConnectionAcceptThreadFunction] Failed to create server socket for port " << connector->GetServerPort() << std::endl;
       vtkErrorWithObjectMacro(connector, "Failed to create server socket !");
       connector->ServerStopFlag = true;
       }
@@ -346,29 +543,63 @@ void* igtlioConnector::ConnectionAcceptThreadFunction(void* ptr)
     {
     if (connector->Type == TYPE_SERVER)
       {
-      igtl::ClientSocket::Pointer client = connector->ServerSocket->WaitForConnection(1000);
-      if (client.IsNotNull()) // if client connected
-        {
-        std::lock_guard<std::recursive_mutex> lock(connector->ClientMutex);
-        int clientThreadID = connector->Thread->SpawnThread((vtkThreadFunctionType)&igtlioConnector::ReceiverThreadFunction, connector);
-        Client clientInfo = Client(connector->NextClientID++, client, clientThreadID);
-        connector->Sockets.push_back(clientInfo);
-        connector->RequestInvokeEvent(ClientConnectedEvent);
+        if(connector->Protocol == PROTOCOL_TCP){
+            igtl::ClientSocket::Pointer client = connector->ServerSocket->WaitForConnection(1000);
+            if (client.IsNotNull()) // if client connected
+              {
+              std::lock_guard<std::recursive_mutex> lock(connector->ClientMutex);
+              int clientThreadID = connector->Thread->SpawnThread((vtkThreadFunctionType)&igtlioConnector::TCPReceiverThreadFunction, connector);
+              Client clientInfo = Client(connector->NextClientID++, client, nullptr, nullptr, PROTOCOL_TCP, clientThreadID, -1, -1);
+              connector->Sockets.push_back(clientInfo);
+              connector->RequestInvokeEvent(ClientConnectedEvent);
+              }
+        }else if(connector->Protocol == PROTOCOL_UDP){
+            //TODO: to be implemented
+        }else{
+            std::cerr << "[igtlioConnector::ConnectionAcceptThreadFunction] Undefined protocol." << std::endl;
         }
       }
     else if (connector->Type == TYPE_CLIENT) // if this->Type == TYPE_CLIENT
       {
       if (connector->Sockets.empty())
         {
-          igtl::ClientSocket::Pointer socket = igtl::ClientSocket::New();
-          int r = socket->ConnectToServer(connector->ServerHostname.c_str(), connector->ServerPort, false);
-          if (r == 0) // if connected to server
-          {
-            std::lock_guard<std::recursive_mutex> lock(connector->ClientMutex);
-            int clientThreadID = connector->Thread->SpawnThread((vtkThreadFunctionType)&igtlioConnector::ReceiverThreadFunction, connector);
-            Client clientInfo = Client(0, socket, clientThreadID);
-            connector->Sockets.push_back(clientInfo);
-            connector->RequestInvokeEvent(ClientConnectedEvent);
+          if(connector->Protocol == PROTOCOL_TCP){
+              igtl::ClientSocket::Pointer socket = igtl::ClientSocket::New();
+              int r = socket->ConnectToServer(connector->ServerHostname.c_str(), connector->ServerPort, false);
+              if (r == 0) // if connected to server
+              {
+                std::lock_guard<std::recursive_mutex> lock(connector->ClientMutex);
+                int clientThreadID = connector->Thread->SpawnThread((vtkThreadFunctionType)&igtlioConnector::TCPReceiverThreadFunction, connector);
+                Client clientInfo = Client(0, socket, nullptr, nullptr, PROTOCOL_TCP, clientThreadID, -1, -1);
+                connector->Sockets.push_back(clientInfo);
+                connector->RequestInvokeEvent(ClientConnectedEvent);
+              }
+              else
+              {
+                // Delay is required for situations where the ConnectToServer function exits without delay
+                // Without it, the loop will be processed extremely quickly and cause the program to hang
+                igtl::Sleep(100);
+              }
+          }else if(connector->Protocol == PROTOCOL_UDP){
+              igtl::UDPClientSocket::Pointer UDPSocket = igtl::UDPClientSocket::New();
+              int joined = UDPSocket->JoinNetwork( connector->ServerHostname.c_str(), connector->ServerPort );
+              if ( joined <= 0 ){
+                  std::cerr << "[igtlioConnector::ConnectionAcceptThreadFunction] Cannot connect to the server." << std::endl;
+                  // Delay is required for situations where the ConnectToServer function exits without delay
+                  // Without it, the loop will be processed extremely quickly and cause the program to hang
+                  igtl::Sleep(100);
+              }else{
+                  igtl::MessageRTPWrapper::Pointer RTPWrapper = igtl::MessageRTPWrapper::New();
+                  std::lock_guard<std::recursive_mutex> lock(connector->ClientMutex);
+                  int clientReceiveThreadID = connector->Thread->SpawnThread((vtkThreadFunctionType)&igtlioConnector::UDPReceiverThreadFunction, connector);
+                  int clientUnwrapThreadID = connector->Thread->SpawnThread((vtkThreadFunctionType)&igtlioConnector::UnwrapThreadFunction, connector);
+                  int clientProcessThreadID = connector->Thread->SpawnThread((vtkThreadFunctionType)&igtlioConnector::UDPProcessThreadFunction, connector);
+                  Client clientInfo = Client(0, nullptr, UDPSocket, RTPWrapper, PROTOCOL_UDP, clientReceiveThreadID, clientUnwrapThreadID, clientProcessThreadID );
+                  connector->Sockets.push_back(clientInfo);
+                  connector->RequestInvokeEvent(ClientConnectedEvent);
+              }
+          }else{
+              std::cerr << "[igtlioConnector::ConnectionAcceptThreadFunction] Undefined protocol." << std::endl;
           }
         }
       }
@@ -431,7 +662,7 @@ void* igtlioConnector::ConnectionAcceptThreadFunction(void* ptr)
 }
 
 //----------------------------------------------------------------------------
-bool igtlioConnector::ReceiveController(int clientID)
+bool igtlioConnector::ReceiveTCPController(int clientID)
 {
   igtl::MessageHeader::Pointer headerMsg;
   headerMsg = igtl::MessageHeader::New();
@@ -546,6 +777,7 @@ bool igtlioConnector::ReceiveController(int clientID)
     {
       if (!this->ServerStopFlag)
       {
+          std::cerr << "Only read " << read << " but expected to read " << buffer->GetPackBodySize() << std::endl;
         vtkErrorMacro("Only read " << read << " but expected to read "
           << buffer->GetPackBodySize() << "\n");
       }
@@ -556,8 +788,137 @@ bool igtlioConnector::ReceiveController(int clientID)
   }
   else
   {
+      std::cerr << "[igtlioConnector::ReceiveTCPController] message wasn't pushed to buffer." << std::endl;
     return false;
   }
+
+  return true;
+}
+
+//----------------------------------------------------------------------------
+bool igtlioConnector::ReceiveUDPController(int clientID)
+{
+    Client client = this->GetClient(clientID);
+    if (client.ID == -1)
+    {
+      return false;
+    }
+    //check if any new messages:
+    RTPMutex->Lock();
+    unsigned long nbMsgs = RTPWrapper->unWrappedMessages.size();
+    RTPMutex->Unlock();
+    //process message:
+    for( unsigned long i = 0 ; i < nbMsgs ; i++ ){
+        igtl::MessageHeader::Pointer headerMsg;
+        headerMsg = igtl::MessageHeader::New();
+        igtl::VideoMessage::Pointer videoMsg;
+        videoMsg = igtl::VideoMessage::New();
+        RTPMutex->Lock();
+        std::map<igtl_uint32, igtl::UnWrappedMessage*>::iterator it = RTPWrapper->unWrappedMessages.begin();
+        igtlUint32 MSGLength = it->second->messageDataLength;
+        igtlUint8 * message = new igtlUint8[ MSGLength ];
+        memcpy( message, it->second->messagePackPointer, MSGLength );
+        delete it->second;
+        it->second = nullptr;
+        RTPWrapper->unWrappedMessages.erase(it);
+        RTPMutex->Unlock();
+        headerMsg->InitPack();
+        memcpy( headerMsg->GetPackPointer(), message, IGTL_HEADER_SIZE );
+        int unpackresult = headerMsg->Unpack( 1 );
+        if( !unpackresult ){
+            std::cerr << "[igtlioConnector::ReceiveUDPController] Error in message header unpacking." << std::endl;
+        }
+        //TODO: add to config
+        int version = 2;
+        if ( headerMsg->GetHeaderVersion() != version ){
+            std::cerr << "[igtlioConnector::ReceiveUDPController] Header version mismatch." << std::endl;
+            return false;
+        }
+
+        // Intercept command devices before they are added to the circular buffer, and add them to the command queue
+        if (std::strcmp(headerMsg->GetDeviceType(), "COMMAND") == 0 || std::strcmp(headerMsg->GetDeviceType(), "RTS_COMMAND") == 0)
+        {
+            igtl::CommandMessage::Pointer commandMsg = igtl::CommandMessage::New();
+            commandMsg->SetMessageHeader( headerMsg );
+            commandMsg->AllocatePack();
+            memcpy(commandMsg->GetPackPointer(), message, commandMsg->GetPackSize());
+
+           if( MSGLength == commandMsg->GetPackSize() )
+           {
+               if (this->ReceiveCommandMessage(commandMsg, client))
+               {
+                   continue;
+               }else{
+                   std::cerr << "[igtlioConnector::ReceiveUDPController] Problem with command message reception." << std::endl;
+               }
+           }else{
+               std::cerr << "[igtlioConnector::ReceiveUDPController] Message size mismatch ( " << "MSGLENGTH (buffer from RTPUnwrapper) = " << MSGLength << " and videoPackSize (length according to header message) = " << videoMsg->GetPackSize() << " )." << std::endl;
+           }
+        }
+        else if( strcmp( headerMsg->GetDeviceType(), "VIDEO" ) == 0 ){
+            //----------------------------------------------------------------
+            // Search Circular Buffer
+            igtlioDeviceKeyType key = igtlioDeviceKeyType::CreateDeviceKey(headerMsg);
+
+            igtlioCircularSectionBufferPointer circBuffer = this->GetCircularSectionBuffer(key, clientID);
+            if (!circBuffer)
+            {
+                circBuffer = igtlioCircularSectionBufferPointer::New();
+                circBuffer->SetPacketMode(igtlioCircularSectionBuffer::SinglePacketMode);
+                circBuffer->SetPacketMode(igtlioCircularSectionBuffer::MultiplePacketsMode);
+                std::lock_guard<std::recursive_mutex> lock(this->CircularBufferMutex);
+                this->SectionBuffer[SectionBufferKey(key, clientID)] = circBuffer;
+            }
+
+            //----------------------------------------------------------------
+            // Load to the circular buffer
+
+            if (circBuffer && circBuffer->StartPush() != -1)
+            {
+                videoMsg->SetMessageHeader( headerMsg );
+                videoMsg->AllocatePack();
+                memcpy(videoMsg->GetPackPointer(), message, videoMsg->GetPackSize());
+
+               if( MSGLength == videoMsg->GetPackSize() ){
+                   circBuffer->StartPush();
+                   igtl::MessageBase::Pointer buffer = circBuffer->GetPushBuffer();
+                   buffer->SetMessageHeader(headerMsg);
+                   buffer->AllocatePack();
+                   memcpy( buffer->GetPackBodyPointer(), videoMsg->GetPackBodyPointer(), videoMsg->GetPackBodySize() );
+                   circBuffer->EndPush();
+               }else{
+                   std::cerr << "[igtlioConnector::ReceiveUDPController] Message size mismatch ( " << "MSGLENGTH (buffer from RTPUnwrapper) = " << MSGLength << " and videoPackSize (length according to header message) = " << videoMsg->GetPackSize() << " )." << std::endl;
+               }
+            }
+            else
+            {
+                std::cerr << "[igtlioConnector::ReceiveUDPController] Couldn't push to circular buffer." << std::endl;
+                //TODO: this is broken
+                return false;
+            }
+        }
+        else
+        {
+            std::cerr << "[igtlioConnector::ReceiveUDPController] Received a " << headerMsg->GetDeviceType() << " message. Don't know what to do with it." << std::endl;
+            //TODO: this is broken
+            return false;
+        }
+        delete [] message;
+    }
+    return true;
+}
+
+//----------------------------------------------------------------------------
+//TODO: might want to do something cleaner than this
+bool igtlioConnector::ReceiveCommandMessage(igtl::CommandMessage::Pointer commandMsg, Client& client)
+{
+  igtl::MessageBase::Pointer buffer = static_cast<igtl::MessageBase::Pointer>(commandMsg);
+
+  igtlioDeviceKeyType key = igtlioDeviceKeyType::CreateDeviceKey(buffer);
+
+  std::lock_guard<std::recursive_mutex> lock(this->IncomingCommandQueueMutex);
+  this->IncomingCommandQueue.push(IncomingCommandType(client.ID, buffer));
+
   return true;
 }
 
@@ -595,18 +956,27 @@ bool igtlioConnector::ReceiveCommandMessage(igtl::MessageHeader::Pointer headerM
 //----------------------------------------------------------------------------
 int igtlioConnector::SendData(igtlUint64 size, unsigned char* data, Client& client)
 {
-  if (client.Socket.IsNull())
-    {
-    return 0;
-    }
+    if(Protocol == PROTOCOL_TCP){
+        if (client.Socket.IsNull())
+          {
+          return 0;
+          }
 
-  // check if connection is alive
-  if (!client.Socket->GetConnected())
-    {
-    return 0;
-    }
+        // check if connection is alive
+        if (!client.Socket->GetConnected())
+          {
+          return 0;
+          }
 
-  return client.Socket->Send(data, size);  // return 1 on success, otherwise 0.
+        return client.Socket->Send(data, size);  // return 1 on success, otherwise 0.
+    }else if(Protocol == PROTOCOL_UDP){
+        //TODO: to implement
+        return 0;
+    }else{
+        std::cerr << "[igtlioConnector::SendData] Undefined protocol." << std::endl;
+        return -1;
+    }
+    return -1;
 }
 
 //----------------------------------------------------------------------------
@@ -657,7 +1027,7 @@ igtlioConnector::Client igtlioConnector::GetClient(int clientId)
     }
   }
 
-  return Client(-1, nullptr, -1);
+  return Client(-1, nullptr, nullptr, nullptr, -1, -1, -1, -1);
 }
 
 //----------------------------------------------------------------------------
@@ -672,7 +1042,10 @@ bool igtlioConnector::RemoveClient(int clientId)
 
   if (clientIt != this->Sockets.end())
   {
-    clientIt->Socket->CloseSocket();
+    //this only needs to be done for TCP sockets:
+    if(clientIt->Socket.IsNotNull()){
+      clientIt->Socket->CloseSocket();
+    }
     this->Sockets.erase(clientIt);
     this->RequestInvokeEvent(ClientDisconnectedEvent);
     return true;
@@ -720,6 +1093,9 @@ void igtlioConnector::ImportDataFromCircularBuffer()
   igtlioConnector::NameListType::iterator nameIter;
   for (nameIter = nameList.begin(); nameIter != nameList.end(); nameIter ++)
     {
+      //IS THIS NECESARY HERE?
+      //TODO
+//      igtlioLockGuard<vtkMutexLock> lock(this->CircularBufferMutex);
     igtlioDeviceKeyType key = nameIter->Key;
     int clientID = nameIter->ClientID;
 
@@ -1313,15 +1689,18 @@ bool igtlioConnector::IsConnected()
   std::lock_guard<std::recursive_mutex> lock(this->ClientMutex);
   for (std::vector<Client>::iterator clientIt = this->Sockets.begin(); clientIt != this->Sockets.end(); ++clientIt)
     {
-    if (clientIt->Socket.IsNotNull())
-      {
-      if (clientIt->Socket->GetConnected())
-        {
-        return true;
-        }
+      if( Protocol == PROTOCOL_TCP ){
+          if (clientIt->Socket.IsNotNull())
+            {
+            if (clientIt->Socket->GetConnected())
+              {
+              return true;
+              }
+            }
+      }else{
+          return true;
       }
     }
-
   return false;
 }
 
