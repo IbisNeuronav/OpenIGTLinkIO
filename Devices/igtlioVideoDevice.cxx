@@ -156,6 +156,8 @@ int igtlioVideoDevice::ReceiveIGTLMessage(igtl::MessageBase::Pointer buffer, boo
       this->SetCurrentCodecType(std::string(Content.codecName));
       this->Modified();
       this->InvokeEvent(VideoModifiedEvent, this);
+      }else{
+        std::cerr << "[igtlioVideoDevice::ReceiveIGTLMessage] Message unpacking/conversion failure. Skipping it." << std::endl;
       }
     }
   return success;
