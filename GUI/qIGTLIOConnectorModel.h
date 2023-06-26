@@ -59,6 +59,7 @@ public:
   enum Columns{
     NameColumn = 0,
     TypeColumn,
+    ProtocolColumn,
     StatusColumn,
     HostnameColumn,
     PortColumn

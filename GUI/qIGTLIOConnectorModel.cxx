@@ -34,7 +34,7 @@
 qIGTLIOConnectorModel::qIGTLIOConnectorModel(QObject *vparent)
   :QAbstractItemModel(vparent)
 {
-  HeaderLabels = QStringList() << "Name" << "Type" << "Status" << "Hostname" << "Port";
+  HeaderLabels = QStringList() << "Name" << "Type" << "Protocol" << "Status" << "Hostname" << "Port";
 }
 
 //------------------------------------------------------------------------------
@@ -89,6 +89,12 @@ QVariant qIGTLIOConnectorModel::data(const QModelIndex &index, int role) const
       {
       Q_ASSERT(cnode->GetType() < igtlioConnector::NUM_TYPE);
       return QString::fromStdString(igtlioConnector::ConnectorTypeStr[cnode->GetType()]);
+      break;
+      }
+    case qIGTLIOConnectorModel::ProtocolColumn:
+      {
+      Q_ASSERT(cnode->GetProtocol() < igtlioConnector::NUM_PROTOCOL);
+      return QString::fromStdString(igtlioConnector::ConnectorProtocolStr[cnode->GetProtocol()]);
       break;
       }
     case qIGTLIOConnectorModel::StatusColumn:

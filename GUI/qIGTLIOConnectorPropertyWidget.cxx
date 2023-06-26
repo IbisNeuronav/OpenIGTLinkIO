@@ -22,6 +22,8 @@ public:
   igtlioConnectorPointer IGTLConnectorNode;
 
   QButtonGroup ConnectorTypeButtonGroup;
+
+  QButtonGroup ConnectorProtocolButtonGroup;
 };
 
 //------------------------------------------------------------------------------
@@ -48,11 +50,16 @@ void qIGTLIOConnectorPropertyWidgetPrivate::init()
                    q, SLOT(updateIGTLConnectorNode()));
   QObject::connect(&this->ConnectorTypeButtonGroup, SIGNAL(buttonClicked(int)),
                    q, SLOT(updateIGTLConnectorNode()));
+  QObject::connect(&this->ConnectorProtocolButtonGroup, SIGNAL(buttonClicked(int)),
+                   q, SLOT(updateIGTLConnectorNode()));
 
   this->ConnectorNotDefinedRadioButton->setVisible(false);
   this->ConnectorTypeButtonGroup.addButton(this->ConnectorNotDefinedRadioButton, igtlioConnector::TYPE_NOT_DEFINED);
   this->ConnectorTypeButtonGroup.addButton(this->ConnectorServerRadioButton, igtlioConnector::TYPE_SERVER);
   this->ConnectorTypeButtonGroup.addButton(this->ConnectorClientRadioButton, igtlioConnector::TYPE_CLIENT);
+
+  this->ConnectorProtocolButtonGroup.addButton(this->ConnectorTCPRadioButton, igtlioConnector::PROTOCOL_TCP);
+  this->ConnectorProtocolButtonGroup.addButton(this->ConnectorUDPRadioButton, igtlioConnector::PROTOCOL_UDP);
 
 }
 
@@ -118,6 +125,14 @@ void setTypeEnabled(qIGTLIOConnectorPropertyWidgetPrivate * d, bool enabled)
 }
 
 //------------------------------------------------------------------------------
+void setProtocolEnabled(qIGTLIOConnectorPropertyWidgetPrivate * d, bool enabled)
+{
+  d->ConnectorProtocolLabel->setEnabled(enabled);
+  d->ConnectorTCPRadioButton->setEnabled(enabled);
+  d->ConnectorUDPRadioButton->setEnabled(enabled);
+}
+
+//------------------------------------------------------------------------------
 void setStateEnabled(qIGTLIOConnectorPropertyWidgetPrivate * d, bool enabled)
 {
   d->ConnectorStateLabel->setEnabled(enabled);
@@ -154,6 +169,9 @@ void qIGTLIOConnectorPropertyWidget::onMRMLNodeModified()
   d->ConnectorNotDefinedRadioButton->setChecked(type == igtlioConnector::TYPE_NOT_DEFINED);
   d->ConnectorServerRadioButton->setChecked(type == igtlioConnector::TYPE_SERVER);
   d->ConnectorClientRadioButton->setChecked(type == igtlioConnector::TYPE_CLIENT);
+  int protocol = d->IGTLConnectorNode->GetProtocol();
+  d->ConnectorTCPRadioButton->setChecked(protocol == igtlioConnector::PROTOCOL_TCP);
+  d->ConnectorUDPRadioButton->setChecked(protocol == igtlioConnector::PROTOCOL_UDP);
 
   setStateEnabled(d, type != igtlioConnector::TYPE_NOT_DEFINED);
 
@@ -162,6 +180,7 @@ void qIGTLIOConnectorPropertyWidget::onMRMLNodeModified()
     {
     setNameEnabled(d, true);
     setTypeEnabled(d, true);
+    setProtocolEnabled(d, true);
     setHostnameEnabled(d, type == igtlioConnector::TYPE_CLIENT);
     setPortEnabled(d, type != igtlioConnector::TYPE_NOT_DEFINED);
     }
@@ -169,6 +188,7 @@ void qIGTLIOConnectorPropertyWidget::onMRMLNodeModified()
     {
     setNameEnabled(d, false);
     setTypeEnabled(d, false);
+    setProtocolEnabled(d, false);
     setHostnameEnabled(d, false);
     setPortEnabled(d, false);
     }
@@ -200,6 +220,7 @@ void qIGTLIOConnectorPropertyWidget::updateIGTLConnectorNode()
 
   d->IGTLConnectorNode->SetName(d->ConnectorNameEdit->text().toStdString());
   d->IGTLConnectorNode->SetType(d->ConnectorTypeButtonGroup.checkedId());
+  d->IGTLConnectorNode->SetProtocol(d->ConnectorProtocolButtonGroup.checkedId());
   d->IGTLConnectorNode->SetServerHostname(d->ConnectorHostNameEdit->text().toStdString());
   d->IGTLConnectorNode->SetServerPort(d->ConnectorPortEdit->text().toInt());
   d->IGTLConnectorNode->SetPersistent(d->PersistentStateCheckBox->isChecked() ?
