@@ -41,6 +41,7 @@ int igtlioVideoConverter::fromIGTL(igtl::MessageBase::Pointer source,
   if ((c & igtl::MessageHeader::UNPACK_BODY) == 0) // if CRC check fails
     {
     // TODO: error handling
+    std::cerr << "[igtlioVideoConverter::fromIGTL] CRC check failed." << std::endl;
     return 0;
     }
   igtl_uint16 frameType = videoMessage->GetFrameType();
@@ -87,8 +88,10 @@ int igtlioVideoConverter::fromIGTL(igtl::MessageBase::Pointer source,
     }
 #endif
   // get header
-  if (!IGTLtoHeader(dynamic_pointer_cast<igtl::MessageBase>(videoMessage), header, outMetaInfo))
-    return 0;
+  if (!IGTLtoHeader(dynamic_pointer_cast<igtl::MessageBase>(videoMessage), header, outMetaInfo)){
+      std::cerr << "[igtlioVideoConverter::fromIGTL] GetHeader failed." << std::endl;
+      return 0;
+  }
 
   if (!dest->transform)
     dest->transform = vtkSmartPointer<vtkMatrix4x4>::New();
@@ -98,8 +101,10 @@ int igtlioVideoConverter::fromIGTL(igtl::MessageBase::Pointer source,
     return 0;
 
   // get Video
-  if (igtlioVideoConverter::IGTLToVTKImageData(dest, videoMessage, decoder) == 0)
+  if (igtlioVideoConverter::IGTLToVTKImageData(dest, videoMessage, decoder) == 0){
+    std::cerr << "[igtlioVideoConverter::fromIGTL] IGTLToVTKImageData conversion failed." << std::endl;
     return 0;
+  }
 
   if (!dest->frameData)
     {
@@ -155,6 +160,7 @@ int igtlioVideoConverter::IGTLToVTKImageData(ContentData *dest, igtl::VideoMessa
   if(videoStreamDecoder->DecodeVideoMSGIntoSingleFrame(videoMessage, pDecodedPic) == -1)
     {
     pDecodedPic->~SourcePicture();
+    std::cerr << "[igtlioVideoConverter::IGTLToVTKImageData] failed to decode video message into frame." << std::endl;
     return 0;
     }
 
@@ -198,25 +204,25 @@ int igtlioVideoConverter::toIGTL(const HeaderData& header, const ContentData& so
   int   ncomp = frameImage->GetNumberOfScalarComponents();
   if (ncomp != 3 && (scalarType != videoMsg->TYPE_INT8 || scalarType != videoMsg->TYPE_UINT8) )
     {
-   std::cerr<<"Invalid image data format!";
+    std::cerr << "Invalid image data format!" << std::endl;
     return 0;
     }
 
   if (encoder == NULL)
     {
-    std::cerr<<"Failed to pack video message - input video message encoder is NULL";
+    std::cerr << "Failed to pack video message - input video message encoder is NULL" << std::endl;
     return 0;
     }
 
   if (videoMsg.IsNull())
     {
-    std::cerr<<"Failed to pack video message - input video message is NULL";
+    std::cerr << "Failed to pack video message - input video message is NULL" << std::endl;
     return 0;
     }
 
   if (!source.image->GetScalarPointer())
     {
-    std::cerr<<"Unable to send video message - image data is NOT valid!";
+    std::cerr << "Unable to send video message - image data is NOT valid!" << std::endl;
     return 0;
     }
 
