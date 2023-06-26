@@ -54,7 +54,7 @@ igtlioVideoDevice::igtlioVideoDevice()
   VideoStreamDecoderI420 = new I420Decoder();
 #if defined(OpenIGTLink_USE_H264)
   VideoStreamDecoderH264 = new H264Decoder();
-  VideoStreamEncoderH264 = new H264Encoder();
+  VideoStreamEncoderH264 = new H264Encoder("");
   VideoStreamEncoderH264->InitializeEncoder();
   VideoStreamEncoderH264->SetLosslessLink(true);
 #endif
