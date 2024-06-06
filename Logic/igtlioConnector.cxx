@@ -248,12 +248,7 @@ int igtlioConnector::Start()
     return 0;
     }
 
-  // setup RTPWrapper:
-  // TODO: add to config (will just set an arbitrary value for now)
-  int kbps = 6000;
-  int netWorkBandWidthInBPS = kbps * 1000; // networkBandwidth is in kbps
-  int time = floor( 8 * RTP_PAYLOAD_LENGTH * 1e9 / netWorkBandWidthInBPS + 1.0 ); // the needed time in nanosecond to send a RTP payload.
-  RTPWrapper->packetIntervalTime = time;
+  SetBandwidth( 2000 );
 
   if (this->ConnectionThreadID >= 0)
     {
@@ -1731,5 +1726,11 @@ bool operator<(const igtlioConnector::SectionBufferKey& lhs, const igtlioConnect
   }
   return false;
 };
+
+void igtlioConnector::SetBandwidth( int bandwidthInKbps ){
+    int netWorkBandWidthInBPS = bandwidthInKbps * 1000; // networkBandwidth is in kbps
+    int time = floor( 8 * RTP_PAYLOAD_LENGTH * 1e9 / netWorkBandWidthInBPS + 1.0 ); // the needed time in nanosecond to send a RTP payload.
+    RTPWrapper->packetIntervalTime = time;
+}
 
 #pragma pop_macro("SendMessage")

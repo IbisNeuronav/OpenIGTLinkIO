@@ -289,6 +289,11 @@ public:
 
   bool IsConnected();
 
+  // Sets the packet interval in the RTPWrapper for the desired bandwidth.
+  // This value is only used when protocol is set to UDP.
+  // Expects a value in kbps.
+  void SetBandwidth( int bandwidthInKbps );
+
   std::vector<int> GetClientIds(); // Thread safe
 
   //----------------------------------------------------------------
